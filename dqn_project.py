@@ -52,17 +52,18 @@ class DQN(object):
         self.min_replay_size = 10000
         print (self.env.observation_space.shape)
         print ([None] + list(self.env.observation_space.shape))
+
         # define yours training operations here...
         self.observation_input = tf.placeholder(tf.float32, shape=[None] + list(self.env.observation_space.shape))
         self.q_values = self.build_model(self.observation_input)
-        #  self.target_model = self.q_values
-        self.local_observation_input = tf.placeholder(tf.float32, shape=[None] + list(self.env.observation_space.shape))
-        self.local_q_values = self.build_model(self.local_observation_input, scope="local")
+
+        # define target network
+        self.target_observation_input = tf.placeholder(tf.float32, shape=[None] + list(self.env.observation_space.shape))
+        self.target_q_values = self.build_model(self.target_observation_input, scope="target")
 
         #  define your update operations here...
         self.action_input = tf.placeholder(tf.int32, shape=[None])
         self.action_input_one_hot = tf.one_hot(self.action_input, env.action_space.n, dtype=tf.float32)
-
         self.action_q_val = tf.reduce_sum(tf.multiply(self.q_values, self.action_input_one_hot), reduction_indices=1)
         self.target_q_val = tf.placeholder(tf.float32, [None])
         self.q_val_error = self.huber_loss(self.action_q_val, self.target_q_val)
@@ -103,7 +104,6 @@ class DQN(object):
         quad = .5 * err * err
         return tf.where(err < mg, quad, lin)
 
-
     def build_model(self, observation_input, scope='train'):
         """
         TODO: Define the tensorflow model
@@ -113,8 +113,8 @@ class DQN(object):
         Currently returns an op that gives all zeros.
         """
         with tf.variable_scope(scope):
-            x = layers.fully_connected(observation_input, 64, activation_fn=tf.nn.relu)
-            x = layers.fully_connected(x, 32, activation_fn=tf.nn.relu)
+            x = layers.fully_connected(observation_input, 128, activation_fn=tf.nn.relu)
+            x = layers.fully_connected(x, 64, activation_fn=tf.nn.relu)
             q_vals = layers.fully_connected(x, env.action_space.n, activation_fn=None)
             return q_vals
 
@@ -133,7 +133,7 @@ class DQN(object):
         if np.random.random() < self.eps_start - self.num_episodes * self.eps_decay:
             act = env.action_space.sample()
         else:
-            act = np.argmax(self.sess.run(self.local_q_values, feed_dict={self.local_observation_input: [obs]}))
+            act = np.argmax(self.sess.run(self.q_values, feed_dict={self.observation_input: [obs]}))
         return act
 
     def update(self, obs, act, next_obs, reward, done):
@@ -143,7 +143,7 @@ class DQN(object):
         """
         #  raise NotImplementedError
         target = reward if done else reward + self.gamma * np.max(
-            self.sess.run(self.q_values, feed_dict={self.observation_input: [next_obs]})
+            self.sess.run(self.target_q_values, feed_dict={self.target_observation_input: [next_obs]})
         )
 
         self.sess.run(self.update_op, feed_dict={self.observation_input: [obs], self.action_input: [act],
@@ -162,7 +162,9 @@ class DQN(object):
         obs = env.reset()
         all_reward = 0
 
-        self.sess.run(self.copy_network)
+        #self.sess.run(self.copy_network)
+        if self.num_steps % self.clone_steps == 0:
+            self.sess.run(self.copy_network)
 
         while not done:
             action = self.select_action(obs, evaluation_mode=False)
@@ -171,11 +173,13 @@ class DQN(object):
             self.num_steps += 1
             self.update(obs, action, next_obs, reward, done)
             obs = next_obs
+        print(self.num_steps)
         summary = tf.Summary()
         summary.value.add(tag='Reward', simple_value=all_reward)
         self.summary_writer.add_summary(summary, self.num_episodes)
         self.summary_writer.flush()
         self.num_episodes += 1
+
 
     def eval(self, save_snapshot=True):
         """
@@ -197,8 +201,7 @@ class DQN(object):
 
     def copyNetwork(self):
         from_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="train")
-        to_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="local")
-
+        to_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="target")
 
         op_holder = []
         for from_var, to_var in zip(from_vars, to_vars):

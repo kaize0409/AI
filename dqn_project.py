@@ -36,13 +36,13 @@ class DQN(object):
         self.sess = tf.Session()
 
         # A few starter hyperparameters
-        self.batch_size = 128
+        self.batch_size = 2
         self.gamma = 0.99
         # If using e-greedy exploration
         self.eps_start = 0.9
         self.eps_end = 0.05
         # self.eps_decay = 1000  # in episodes
-        self.eps_decay = (self.eps_start - self.eps_end) / 1000 # in episodes
+        self.eps_decay = (self.eps_start - self.eps_end) / 1000  # in episodes
         # If using a target network
         self.clone_steps = 5000
 
@@ -50,6 +50,7 @@ class DQN(object):
         self.replay_memory = ReplayMemory(100000)
         # Perhaps you want to have some samples in the memory before starting to train?
         self.min_replay_size = 10000
+
         print (self.env.observation_space.shape)
         print ([None] + list(self.env.observation_space.shape))
 
@@ -113,8 +114,8 @@ class DQN(object):
         Currently returns an op that gives all zeros.
         """
         with tf.variable_scope(scope):
-            x = layers.fully_connected(observation_input, 128, activation_fn=tf.nn.relu)
-            x = layers.fully_connected(x, 64, activation_fn=tf.nn.relu)
+            x = layers.fully_connected(observation_input, 64, activation_fn=tf.nn.relu)
+            x = layers.fully_connected(x, 32, activation_fn=tf.nn.relu)
             q_vals = layers.fully_connected(x, env.action_space.n, activation_fn=None)
             return q_vals
 
@@ -128,9 +129,8 @@ class DQN(object):
 
         Currently returns a random action.
         """
-        #return env.action_space.sample()
-        #  ?
-        if np.random.random() < self.eps_start - self.num_episodes * self.eps_decay:
+        epsilon = 0 if evaluation_mode else self.get_epsilon()
+        if np.random.random() < epsilon:
             act = env.action_space.sample()
         else:
             act = np.argmax(self.sess.run(self.q_values, feed_dict={self.observation_input: [obs]}))
@@ -141,13 +141,40 @@ class DQN(object):
         TODO: Implement the functionality to update the network according to the
         Q-learning rule
         """
-        #  raise NotImplementedError
+
         target = reward if done else reward + self.gamma * np.max(
             self.sess.run(self.target_q_values, feed_dict={self.target_observation_input: [next_obs]})
         )
 
         self.sess.run(self.update_op, feed_dict={self.observation_input: [obs], self.action_input: [act],
                                                  self.target_q_val: [target]})
+
+    def perceive(self, obs, action, next_obs, reward, done):
+
+        self.replay_memory.push(obs, action, next_obs, reward, done)
+
+        if len(self.replay_memory) > self.replay_memory.capacity:
+            self.replay_memory.pop()
+
+        target = []
+        if len(self.replay_memory) > self.batch_size:
+            minibatch = self.replay_memory.sample(self.batch_size)
+            state_batch=[data[0] for data in minibatch]
+            action_batch=[data[1] for data in minibatch]
+            next_state_batch=[data[2] for data in minibatch]
+            reward_batch=[data[3] for data in minibatch]
+
+            for i in range(self.batch_size):
+                done = minibatch[i][4]
+                if done:
+                    target.append(reward_batch[i])
+                else:
+                    target.append(reward_batch[i] + self.gamma * np.max(
+                        self.sess.run(self.target_q_values, feed_dict={self.target_observation_input: [next_state_batch[i]]}
+                                      )))
+
+            self.sess.run(self.update_op, feed_dict={self.observation_input: state_batch, self.action_input: action_batch,
+                                                 self.target_q_val: target})
 
     def train(self):
         """
@@ -163,23 +190,26 @@ class DQN(object):
         all_reward = 0
 
         #self.sess.run(self.copy_network)
-        if self.num_steps % self.clone_steps == 0:
-            self.sess.run(self.copy_network)
 
         while not done:
             action = self.select_action(obs, evaluation_mode=False)
             next_obs, reward, done, info = env.step(action)
+
+
             all_reward += reward
             self.num_steps += 1
-            self.update(obs, action, next_obs, reward, done)
+            #self.update(obs, action, next_obs, reward, done)
+            self.perceive(obs, action, next_obs, reward, done)
             obs = next_obs
+            if self.num_steps % self.clone_steps == 0:
+                self.sess.run(self.copy_network)
+
         print(self.num_steps)
         summary = tf.Summary()
         summary.value.add(tag='Reward', simple_value=all_reward)
         self.summary_writer.add_summary(summary, self.num_episodes)
         self.summary_writer.flush()
         self.num_episodes += 1
-
 
     def eval(self, save_snapshot=True):
         """
@@ -208,12 +238,20 @@ class DQN(object):
             op_holder.append(to_var.assign(from_var))
         return op_holder
 
+    def get_epsilon(self):
+        current_eps = self.eps_start - self.num_episodes * self.eps_decay
+        if current_eps < self.eps_end:
+            return self.eps_end
+        else:
+            return current_eps
+
 def train(dqn):
     for i in count(1):
         dqn.train()
         # every 10 episodes run an evaluation episode
         if i % 10 == 0:
             dqn.eval()
+
 
 def eval(dqn):
     """
@@ -233,7 +271,7 @@ if __name__ == '__main__':
     # it may simply be hitting the ground too hard or a bit jerky. Getting to ~250
     # may require some fine tuning.
     env = gym.make('LunarLander-v2')
-    env.seed(args.seed)
+    #env.seed(41)
     # Consider using this for the challenge portion
     # env = env_wrappers.wrap_env(env)
 
